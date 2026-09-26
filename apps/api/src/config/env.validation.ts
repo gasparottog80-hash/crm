@@ -121,6 +121,10 @@ export class EnvironmentVariables {
 
 	@IsOptional()
 	@IsString()
+	@MinLength(32, {
+		message:
+			"AGENT_BRIDGE_SECRET must be at least 32 characters. Generate one with: openssl rand -base64 32",
+	})
 	AGENT_BRIDGE_SECRET?: string;
 
 	@IsOptional()
