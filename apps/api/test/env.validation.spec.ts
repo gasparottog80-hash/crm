@@ -9,6 +9,10 @@ const required = {
 };
 
 describe("environment validation", () => {
+	it("allows the bridge secret to be absent", () => {
+		expect(validateEnv(required).AGENT_BRIDGE_SECRET).toBeUndefined();
+	});
+
 	it("treats an empty bridge secret as an unset optional value", () => {
 		expect(
 			validateEnv({ ...required, AGENT_BRIDGE_SECRET: "" }).AGENT_BRIDGE_SECRET,
