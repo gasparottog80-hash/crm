@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import "reflect-metadata";
 import { validateEnv } from "../src/config/env.validation";
 
 const required = {
