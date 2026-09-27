@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { ContextLogger } from "../src/logging/context-logger";
 import {
@@ -122,21 +123,33 @@ describe("request context", () => {
 	});
 });
 
+type LoggedRequest = {
+	message: string;
+	path: string;
+	apiKeyPresented: boolean;
+};
+
 type MiddlewareRun = {
 	requestId: string;
 	seen: string | undefined;
+	finish: () => LoggedRequest;
 };
 
+type RequestTarget = { originalUrl: string; path: string };
+
 describe("RequestLoggerMiddleware", () => {
-	function run(headers: Record<string, string>): MiddlewareRun {
+	function run(
+		headers: Record<string, string>,
+		target: RequestTarget = { originalUrl: "/things", path: "/things" },
+	): MiddlewareRun {
 		const middleware = new RequestLoggerMiddleware();
 		let requestId = "";
 		let seen: string | undefined;
+		let onFinish: () => void = () => undefined;
 
 		const request = {
 			method: "GET",
-			originalUrl: "/things",
-			path: "/things",
+			...target,
 			ip: "127.0.0.1",
 			get: (name: string) => headers[name.toLowerCase()],
 		} as unknown as Request;
@@ -146,14 +159,31 @@ describe("RequestLoggerMiddleware", () => {
 			setHeader: (_name: string, value: string) => {
 				requestId = value;
 			},
-			on: () => response,
+			on: (_event: string, listener: () => void) => {
+				onFinish = listener;
+				return response;
+			},
 		} as unknown as Response;
 
 		middleware.use(request, response, (() => {
 			seen = getRequestContext()?.requestId;
 		}) as NextFunction);
 
-		return { requestId, seen };
+		const finish = (): LoggedRequest => {
+			const spy = spyOn(Logger.prototype, "log").mockImplementation(
+				() => undefined,
+			);
+
+			try {
+				onFinish();
+				expect(spy).toHaveBeenCalledTimes(1);
+				return spy.mock.calls[0]?.[0] as LoggedRequest;
+			} finally {
+				spy.mockRestore();
+			}
+		};
+
+		return { requestId, seen, finish };
 	}
 
 	it("stamps a request id and exposes it to the handler", () => {
@@ -174,5 +204,27 @@ describe("RequestLoggerMiddleware", () => {
 
 		expect(requestId).not.toContain("\n");
 		expect(requestId).toMatch(/^[0-9a-f-]{36}$/);
+	});
+
+	it("logs the path without its query string", () => {
+		const logged = run(
+			{},
+			{ originalUrl: "/api/test?token=secret&foo=bar", path: "/api/test" },
+		).finish();
+
+		expect(logged.path).toBe("/api/test");
+		expect(logged.message).not.toContain("?");
+		expect(JSON.stringify(logged)).not.toContain("secret");
+	});
+
+	it("records that an api key was presented without logging it", () => {
+		const logged = run({ "x-api-key": "crm_live_secret" }).finish();
+
+		expect(logged.apiKeyPresented).toBe(true);
+		expect(JSON.stringify(logged)).not.toContain("crm_live_secret");
+	});
+
+	it("records that no api key was presented", () => {
+		expect(run({}).finish().apiKeyPresented).toBe(false);
 	});
 });
