@@ -73,7 +73,11 @@ export async function claimDue(
 
 export async function retireExhausted(
 	limit: number = DISPATCH.reconcile.retire,
+	kinds?: { only: readonly string[] },
 ): Promise<TaskSubject[]> {
+	const only = kinds?.only ?? [];
+	if (kinds && only.length === 0) return [];
+
 	const now = new Date();
 
 	return db.$queryRaw<TaskSubject[]>`
@@ -83,6 +87,7 @@ export async function retireExhausted(
 			WHERE c."finishedAt" IS NULL
 				AND c."attempts" >= ${MAX_ATTEMPTS}
 				AND (c."leasedUntil" IS NULL OR c."leasedUntil" < ${now})
+				AND (${only}::text[] = '{}' OR c.kind = ANY(${only}::text[]))
 			ORDER BY c."dueAt" ASC
 			LIMIT ${limit}
 			FOR UPDATE SKIP LOCKED

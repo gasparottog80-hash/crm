@@ -8,6 +8,7 @@ import {
 	Max,
 	Min,
 	MinLength,
+	ValidateIf,
 	validateSync,
 } from "class-validator";
 
@@ -120,6 +121,7 @@ export class EnvironmentVariables {
 	AGENT_URL?: string;
 
 	@IsOptional()
+	@ValidateIf((_environment, value) => value !== "")
 	@IsString()
 	@MinLength(32, {
 		message:

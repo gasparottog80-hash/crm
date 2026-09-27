@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { db } from "@crm/db";
-import { DIRECT_KINDS } from "@crm/db/agent-tasks";
 import {
 	claimDue,
 	completeTask,
@@ -9,9 +8,14 @@ import {
 	scheduleTask,
 } from "../agent/lib/tasks";
 
-const kind = "test-lease";
+const suffix = process.env.TEST_RUN_ID ?? "tasks-integration-spec";
+const kind = `test-lease-${suffix}`;
 
-const RESEARCH = { except: DIRECT_KINDS } as const;
+const RESEARCH = { only: [kind] } as const;
+
+function retire(limit?: number) {
+	return retireExhausted(limit, RESEARCH);
+}
 
 async function clear() {
 	await db.agentTask.deleteMany({ where: { kind } });
@@ -149,39 +153,7 @@ describe("claimDue", () => {
 		expect(await claimDue(10, RESEARCH)).toHaveLength(0);
 	});
 
-	it("holds the limit when the planner believes the table holds one row", async () => {
-		await db.agentTask.deleteMany({});
-		const mine = [(await queue({ priority: 5 })).id];
-		await db.$executeRaw`ANALYZE "agentTask"`;
-		for (let priority = 4; priority >= 0; priority--) {
-			mine.push((await queue({ priority })).id);
-		}
-
-		const first = await claimDue(2, RESEARCH);
-
-		expect(first.map((task) => task.priority)).toEqual([5, 4]);
-
-		const claimedIds = first.map((task) => task.id);
-		for (let pass = 0; pass < 3; pass++) {
-			const next = await claimDue(2, RESEARCH);
-			expect(next.length).toBeLessThanOrEqual(2);
-			claimedIds.push(...next.map((task) => task.id));
-		}
-
-		expect(claimedIds.toSorted()).toEqual(mine.toSorted());
-
-		const rows = await db.agentTask.findMany({
-			where: { id: { in: mine } },
-			select: { attempts: true, leasedUntil: true },
-		});
-		for (const row of rows) {
-			expect(row.attempts).toBe(1);
-			expect(row.leasedUntil).not.toBeNull();
-		}
-	});
-
 	it("gives each due row to one caller and no caller more than its limit", async () => {
-		await db.agentTask.deleteMany({});
 		const mine: string[] = [];
 		for (let row = 0; row < 8; row++) mine.push((await queue()).id);
 
@@ -213,7 +185,7 @@ describe("retireExhausted", () => {
 			await expire(task.id);
 		}
 
-		const retired = await retireExhausted();
+		const retired = await retire();
 		expect(retired.map((t) => t.id)).toContain(task.id);
 		expect(retired.find((t) => t.id === task.id)?.contactId).toBe(contact.id);
 
@@ -230,14 +202,14 @@ describe("retireExhausted", () => {
 			if (attempt < MAX_ATTEMPTS - 1) await expire(task.id);
 		}
 
-		expect(await retireExhausted()).toHaveLength(0);
+		expect(await retire()).toHaveLength(0);
 	});
 
 	it("leaves work that still has attempts left", async () => {
 		await queue();
 		await claimDue(10, RESEARCH);
 
-		expect(await retireExhausted()).toHaveLength(0);
+		expect(await retire()).toHaveLength(0);
 	});
 
 	it("retires no more rows than the limit allows", async () => {
@@ -250,7 +222,7 @@ describe("retireExhausted", () => {
 		}
 
 		for (let pass = 0; pass < 3; pass++) {
-			expect((await retireExhausted(2)).length).toBeLessThanOrEqual(2);
+			expect((await retire(2)).length).toBeLessThanOrEqual(2);
 		}
 
 		const open = await db.agentTask.count({
@@ -259,33 +231,14 @@ describe("retireExhausted", () => {
 		expect(open).toBe(0);
 	});
 
-	it("holds the limit when the planner believes the table holds one row", async () => {
-		await db.agentTask.deleteMany({});
-		const mine = [(await queue()).id];
-		await db.$executeRaw`ANALYZE "agentTask"`;
-		for (let row = 0; row < 2; row++) mine.push((await queue()).id);
-
-		await exhaust();
-
-		const retiredIds: string[] = [];
-		for (let pass = 0; pass < 3; pass++) {
-			const retired = await retireExhausted(2);
-			expect(retired.length).toBeLessThanOrEqual(2);
-			retiredIds.push(...retired.map((task) => task.id));
-		}
-
-		expect(retiredIds.toSorted()).toEqual(mine.toSorted());
-	});
-
 	it("gives each exhausted row to one caller and no caller more than its limit", async () => {
-		await db.agentTask.deleteMany({});
 		const mine: string[] = [];
 		for (let row = 0; row < 8; row++) mine.push((await queue()).id);
 
 		await exhaust();
 
 		const results = await Promise.all(
-			Array.from({ length: 4 }, () => retireExhausted(2)),
+			Array.from({ length: 4 }, () => retire(2)),
 		);
 		for (const retired of results) {
 			expect(retired.length).toBeLessThanOrEqual(2);

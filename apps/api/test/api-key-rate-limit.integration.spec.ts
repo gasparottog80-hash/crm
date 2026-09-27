@@ -83,14 +83,14 @@ describe("apiKey plugin rate limiting (isolated test instance, crm_test only)", 
 
 		await auth.api.getSession({ headers: headersWithKey(key) });
 
-		try {
-			await auth.api.getSession({ headers: headersWithKey(key) });
-			throw new Error("expected getSession to throw");
-		} catch (error) {
-			const body = (error as { body?: { details?: { tryAgainIn?: number } } })
-				.body;
-			expect(body?.details?.tryAgainIn).toBeGreaterThan(0);
-		}
+		const error = await auth.api
+			.getSession({ headers: headersWithKey(key) })
+			.then(
+				() => null,
+				(error) => error as { body?: { details?: { tryAgainIn?: number } } },
+			);
+		expect(error).not.toBeNull();
+		expect(error?.body?.details?.tryAgainIn).toBeGreaterThan(0);
 	});
 
 	it("never lets the stored counter exceed the limit under concurrency", async () => {
@@ -166,13 +166,22 @@ describe("backfillApiKeyRateLimit (crm_test only, never run against crm)", () =>
 			maxRequests: 999,
 			timeWindowMs: 1,
 		});
-		expect(second.updated).toBe(0);
+		expect(second.alreadyPolicied).toBeGreaterThan(0);
 
 		const unchanged = await db.apikey.findUniqueOrThrow({
 			where: { id: legacy.id },
 			select: { rateLimitMax: true },
 		});
 		expect(unchanged.rateLimitMax).toBe(7);
+	});
+
+	it("rejects invalid policies before writing any keys", async () => {
+		await expect(
+			backfillApiKeyRateLimit(db, { maxRequests: 0, timeWindowMs: 1 }),
+		).rejects.toThrow(RangeError);
+		await expect(
+			backfillApiKeyRateLimit(db, { maxRequests: 1, timeWindowMs: -1 }),
+		).rejects.toThrow(RangeError);
 	});
 
 	it("leaves an already-policied key's limit untouched", async () => {

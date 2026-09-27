@@ -120,6 +120,7 @@ describe("Auth (e2e)", () => {
 		);
 
 		expect(response.status).toBe(429);
+		expect(response.headers["retry-after"]).toBeUndefined();
 	});
 
 	it("carries Retry-After, in seconds, on a rate-limited response", async () => {

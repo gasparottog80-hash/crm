@@ -15,10 +15,23 @@ const WITHOUT_POLICY: Prisma.ApikeyWhereInput = {
 	OR: [{ rateLimitMax: null }, { rateLimitTimeWindow: null }],
 };
 
+function isPositiveInteger(value: number): boolean {
+	return Number.isSafeInteger(value) && value > 0;
+}
+
 export async function backfillApiKeyRateLimit(
 	db: Db,
 	policy: ApiKeyRateLimitPolicy,
 ): Promise<ApiKeyRateLimitBackfillResult> {
+	if (
+		!isPositiveInteger(policy.maxRequests) ||
+		!isPositiveInteger(policy.timeWindowMs)
+	) {
+		throw new RangeError(
+			"API key rate-limit policy values must be positive integers.",
+		);
+	}
+
 	const alreadyPolicied = await db.apikey.count({
 		where: { NOT: WITHOUT_POLICY },
 	});
