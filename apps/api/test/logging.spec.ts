@@ -126,13 +126,21 @@ describe("request context", () => {
 type LoggedRequest = {
 	message: string;
 	path: string;
+	statusCode: number;
 	apiKeyPresented: boolean;
 };
+
+const LOG_LEVELS = ["log", "warn", "error", "verbose"] as const;
+
+type LogLevel = (typeof LOG_LEVELS)[number];
+
+type LoggedCall = { level: LogLevel; payload: LoggedRequest };
 
 type MiddlewareRun = {
 	requestId: string;
 	seen: string | undefined;
-	finish: () => LoggedRequest;
+	events: string[];
+	finish: () => LoggedCall;
 };
 
 type RequestTarget = { originalUrl: string; path: string };
@@ -141,11 +149,12 @@ describe("RequestLoggerMiddleware", () => {
 	function run(
 		headers: Record<string, string>,
 		target: RequestTarget = { originalUrl: "/things", path: "/things" },
+		statusCode = 200,
 	): MiddlewareRun {
 		const middleware = new RequestLoggerMiddleware();
 		let requestId = "";
 		let seen: string | undefined;
-		let onFinish: () => void = () => undefined;
+		const listeners = new Map<string, () => void>();
 
 		const request = {
 			method: "GET",
@@ -155,12 +164,12 @@ describe("RequestLoggerMiddleware", () => {
 		} as unknown as Request;
 
 		const response = {
-			statusCode: 200,
+			statusCode,
 			setHeader: (_name: string, value: string) => {
 				requestId = value;
 			},
-			on: (_event: string, listener: () => void) => {
-				onFinish = listener;
+			on: (event: string, listener: () => void) => {
+				listeners.set(event, listener);
 				return response;
 			},
 		} as unknown as Response;
@@ -169,21 +178,28 @@ describe("RequestLoggerMiddleware", () => {
 			seen = getRequestContext()?.requestId;
 		}) as NextFunction);
 
-		const finish = (): LoggedRequest => {
-			const spy = spyOn(Logger.prototype, "log").mockImplementation(
-				() => undefined,
+		const finish = (): LoggedCall => {
+			const calls: LoggedCall[] = [];
+			const spies = LOG_LEVELS.map((level) =>
+				spyOn(Logger.prototype, level).mockImplementation(
+					(payload: LoggedRequest) => {
+						calls.push({ level, payload });
+					},
+				),
 			);
 
 			try {
-				onFinish();
-				expect(spy).toHaveBeenCalledTimes(1);
-				return spy.mock.calls[0]?.[0] as LoggedRequest;
+				listeners.get("finish")?.();
+				expect(calls).toHaveLength(1);
+				return calls[0] as LoggedCall;
 			} finally {
-				spy.mockRestore();
+				for (const spy of spies) {
+					spy.mockRestore();
+				}
 			}
 		};
 
-		return { requestId, seen, finish };
+		return { requestId, seen, events: [...listeners.keys()], finish };
 	}
 
 	it("stamps a request id and exposes it to the handler", () => {
@@ -210,7 +226,7 @@ describe("RequestLoggerMiddleware", () => {
 		const logged = run(
 			{},
 			{ originalUrl: "/api/test?token=secret&foo=bar", path: "/api/test" },
-		).finish();
+		).finish().payload;
 
 		expect(logged.path).toBe("/api/test");
 		expect(logged.message).not.toContain("?");
@@ -218,13 +234,31 @@ describe("RequestLoggerMiddleware", () => {
 	});
 
 	it("records that an api key was presented without logging it", () => {
-		const logged = run({ "x-api-key": "crm_live_secret" }).finish();
+		const logged = run({ "x-api-key": "crm_live_secret" }).finish().payload;
 
 		expect(logged.apiKeyPresented).toBe(true);
 		expect(JSON.stringify(logged)).not.toContain("crm_live_secret");
 	});
 
 	it("records that no api key was presented", () => {
-		expect(run({}).finish().apiKeyPresented).toBe(false);
+		expect(run({}).finish().payload.apiKeyPresented).toBe(false);
+	});
+
+	it("logs once the response emits finish", () => {
+		expect(run({}).events).toEqual(["finish"]);
+	});
+
+	it.each([
+		[200, "/things", "log"],
+		[404, "/things", "warn"],
+		[500, "/things", "error"],
+		[200, "/health", "verbose"],
+		[503, "/health", "error"],
+	] as const)("logs a %i on %s at %s", (statusCode, path, level) => {
+		const logged = run({}, { originalUrl: path, path }, statusCode).finish();
+
+		expect(logged.level).toBe(level);
+		expect(logged.payload.statusCode).toBe(statusCode);
+		expect(logged.payload.path).toBe(path);
 	});
 });
