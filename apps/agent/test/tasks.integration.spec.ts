@@ -44,6 +44,13 @@ async function expire(taskId: string) {
 	});
 }
 
+async function exhaust() {
+	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		const claimed = await claimDue(10, RESEARCH);
+		for (const task of claimed) await expire(task.id);
+	}
+}
+
 async function someone() {
 	return db.contact.create({
 		data: {
@@ -141,6 +148,59 @@ describe("claimDue", () => {
 
 		expect(await claimDue(10, RESEARCH)).toHaveLength(0);
 	});
+
+	it("holds the limit when the planner believes the table holds one row", async () => {
+		await db.agentTask.deleteMany({});
+		const mine = [(await queue({ priority: 5 })).id];
+		await db.$executeRaw`ANALYZE "agentTask"`;
+		for (let priority = 4; priority >= 0; priority--) {
+			mine.push((await queue({ priority })).id);
+		}
+
+		const first = await claimDue(2, RESEARCH);
+
+		expect(first.map((task) => task.priority)).toEqual([5, 4]);
+
+		const claimedIds = first.map((task) => task.id);
+		for (let pass = 0; pass < 3; pass++) {
+			const next = await claimDue(2, RESEARCH);
+			expect(next.length).toBeLessThanOrEqual(2);
+			claimedIds.push(...next.map((task) => task.id));
+		}
+
+		expect(claimedIds.toSorted()).toEqual(mine.toSorted());
+
+		const rows = await db.agentTask.findMany({
+			where: { id: { in: mine } },
+			select: { attempts: true, leasedUntil: true },
+		});
+		for (const row of rows) {
+			expect(row.attempts).toBe(1);
+			expect(row.leasedUntil).not.toBeNull();
+		}
+	});
+
+	it("gives each due row to one caller and no caller more than its limit", async () => {
+		await db.agentTask.deleteMany({});
+		const mine: string[] = [];
+		for (let row = 0; row < 8; row++) mine.push((await queue()).id);
+
+		const results = await Promise.all(
+			Array.from({ length: 4 }, () => claimDue(2, RESEARCH)),
+		);
+		for (const claimed of results) {
+			expect(claimed.length).toBeLessThanOrEqual(2);
+		}
+
+		const ids = results.flatMap((claimed) => claimed.map((task) => task.id));
+		expect(new Set(ids).size).toBe(ids.length);
+		for (const id of ids) expect(mine).toContain(id);
+
+		const leased = await db.agentTask.count({
+			where: { id: { in: mine }, attempts: 1, leasedUntil: { not: null } },
+		});
+		expect(leased).toBe(ids.length);
+	});
 });
 
 describe("retireExhausted", () => {
@@ -197,6 +257,48 @@ describe("retireExhausted", () => {
 			where: { id: { in: mine }, finishedAt: null },
 		});
 		expect(open).toBe(0);
+	});
+
+	it("holds the limit when the planner believes the table holds one row", async () => {
+		await db.agentTask.deleteMany({});
+		const mine = [(await queue()).id];
+		await db.$executeRaw`ANALYZE "agentTask"`;
+		for (let row = 0; row < 2; row++) mine.push((await queue()).id);
+
+		await exhaust();
+
+		const retiredIds: string[] = [];
+		for (let pass = 0; pass < 3; pass++) {
+			const retired = await retireExhausted(2);
+			expect(retired.length).toBeLessThanOrEqual(2);
+			retiredIds.push(...retired.map((task) => task.id));
+		}
+
+		expect(retiredIds.toSorted()).toEqual(mine.toSorted());
+	});
+
+	it("gives each exhausted row to one caller and no caller more than its limit", async () => {
+		await db.agentTask.deleteMany({});
+		const mine: string[] = [];
+		for (let row = 0; row < 8; row++) mine.push((await queue()).id);
+
+		await exhaust();
+
+		const results = await Promise.all(
+			Array.from({ length: 4 }, () => retireExhausted(2)),
+		);
+		for (const retired of results) {
+			expect(retired.length).toBeLessThanOrEqual(2);
+		}
+
+		const ids = results.flatMap((retired) => retired.map((task) => task.id));
+		expect(new Set(ids).size).toBe(ids.length);
+		for (const id of ids) expect(mine).toContain(id);
+
+		const open = await db.agentTask.count({
+			where: { id: { in: mine }, finishedAt: null },
+		});
+		expect(open).toBe(mine.length - ids.length);
 	});
 });
 
